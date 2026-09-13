@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>My Drive — NexCore</title>
+<link rel="stylesheet" href="../shared/styles.css">
+</head>
+<body>
+
+<div class="app-shell">
+  <header class="app-header">
+    <div class="mark">nexcore</div>
+    <div class="search">
+      <span>🔍</span>
+      <input type="text" id="searchInput" placeholder="Search your drive" autocomplete="off">
+      <button id="searchClear" class="search-clear" style="display:none;" aria-label="Clear search">×</button>
+    </div>
+    <div class="user-menu">
+      <button class="user-chip" id="userChip">
+        <span class="avatar" id="userAvatar">…</span>
+        <span id="userEmailShort">…</span>
+      </button>
+      <div class="user-dropdown" id="userDropdown">
+        <div class="ud-email" id="userEmailFull"></div>
+        <button id="goSettings">Settings</button>
+        <button id="doLogout">Sign out</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="app-body">
+    <aside class="sidebar">
+      <div class="new-menu">
+        <button class="btn btn-primary btn-new" id="newBtn">+ New</button>
+        <div class="new-dropdown" id="newDropdown">
+          <button id="newFolderBtn">📁 New folder</button>
+          <button id="uploadBtn">⬆ Upload file(s)</button>
+        </div>
+      </div>
+
+      <div class="view-toggle">
+        <button id="viewGrid" class="active">Grid</button>
+        <button id="viewList">List</button>
+      </div>
+
+      <div class="storage-block">
+        <div class="storage-track"><div id="storageBar"></div></div>
+        <div id="storageLabel">…</div>
+      </div>
+    </aside>
+
+    <main class="drive-main" id="driveMain">
+      <div class="breadcrumb" id="breadcrumb"></div>
+      <div class="item-grid" id="driveGrid"></div>
+      <div class="drive-empty" id="driveEmpty" style="display:none;">
+        <svg class="big-icon" viewBox="0 0 24 24" fill="none"><path d="M3 6.5C3 5.67 3.67 5 4.5 5H9.5L11.5 7.5H19.5C20.33 7.5 21 8.17 21 9V17.5C21 18.33 20.33 19 19.5 19H4.5C3.67 19 3 18.33 3 17.5V6.5Z" stroke="#b8ada0" stroke-width="1.2"/></svg>
+        <strong>Nothing here yet</strong>
+        <p>Drag files in, or use New to add a folder or upload something.</p>
+      </div>
+    </main>
+  </div>
+</div>
+
+<input type="file" id="fileInput" multiple style="display:none;">
+
+<div class="lightbox-backdrop" id="lightbox" style="display:none;">
+  <button class="lightbox-close" id="lightboxClose" aria-label="Close preview">×</button>
+  <div class="lightbox-img-wrap">
+    <span class="lightbox-spinner" id="lightboxSpinner">Loading…</span>
+    <img id="lightboxImg" style="display:none;" alt="">
+  </div>
+  <div class="lightbox-bar">
+    <span class="lb-name" id="lightboxName"></span>
+    <div class="lb-actions">
+      <a class="btn btn-ghost" id="lightboxDownload" href="#">Download</a>
+    </div>
+  </div>
+</div>
+
+<script src="../shared/api-client.js"></script>
+<script src="../shared/consent.js"></script>
+<script>
+(function(){
+  let currentUser = null;
+  let currentFolder = null; // null = root
+  let path = []; // [{id,name}]
+  let viewMode = 'grid';
+  let searchQuery = '';
+  let searchDebounceTimer = null;
+
+  // Mirrors backend/server.js's INLINE_SAFE_MIME_TYPES. Deliberately
+  // excludes image/svg+xml — SVGs can carry <script> and this list is
+  // only for formats safe to render inline.
+  const PREVIEWABLE_MIME = new Set([
+    'image/png', 'image/jpeg', 'image/gif', 'image/webp',
+    'image/bmp', 'image/x-icon', 'image/vnd.microsoft.icon'
+  ]);
+  function isPreviewableImage(item){
+    return item.type === 'file' && PREVIEWABLE_MIME.has(item.mime);
+  }
+
+  async function boot(){
+    let me;
+    try{ me = await Api.me(); }catch(e){ me = { email: null }; }
+    if(!me.email){ window.location.href = '/login/'; return; }
+    currentUser = me.email;
+    document.getElementById('userEmailFull').textContent = currentUser;
+    document.getElementById('userEmailShort').textContent = currentUser.split('@')[0];
+    document.getElementById('userAvatar').textContent = currentUser[0].toUpperCase();
+
+    const uiPref = (typeof readUIPref === 'function') ? readUIPref() : null;
+    if(uiPref){
+      viewMode = uiPref.viewMode || 'grid';
+      currentFolder = uiPref.folderId || null;
+    }
+    setViewMode(viewMode, false);
+    await rebuildPathTo(currentFolder);
+    await renderAll();
+    wireEvents();
+  }
+
+  async function rebuildPathTo(folderId){
+    // Walk up by re-fetching each ancestor's own listing context isn't
+    // directly available, so we reconstruct via repeated lookups using
+    // the folder's parent chain returned by listing its own folder (we
+    // don't have a direct "get node" endpoint exposed to the client, so
+    // we rebuild path by remembering it as we navigate instead).
+    // On a hard refresh we fall back to just showing the folder id\u2019s
+    // immediate context by re-deriving from local memory if present.
+    if(!folderId){ path = []; return; }
+    // Best effort: keep whatever path was already known (e.g. from a
+    // click-through navigation this session). If we don't have it
+    // (e.g. after a fresh reload deep-linked via saved preference),
+    // just show the folder as a single unnamed-but-functional crumb.
+    if(path.length === 0 || path[path.length-1].id !== folderId){
+      path = [{ id: folderId, name: 'Folder' }];
+    }
+  }
+
+  function persistUIPref(){
+    if(typeof saveUIPref === 'function'){
+      saveUIPref({ folderId: currentFolder, viewMode });
+    }
+  }
+
+  async function renderAll(){
+    if(searchQuery){
+      await renderSearchResults();
+    } else {
+      renderBreadcrumb();
+      await renderGrid();
+    }
+    await renderStorage();
+  }
+
+  function renderBreadcrumb(){
+    const el = document.getElementById('breadcrumb');
+    const crumbs = [{ id:null, name:'My Drive' }, ...path];
+    el.innerHTML = crumbs.map((c, i) => {
+      const isLast = i === crumbs.length - 1;
+      return `<button class="crumb ${isLast?'crumb-current':''}" data-folder="${c.id ?? ''}" ${isLast?'disabled':''}>${escapeHTML(c.name)}</button>`
+        + (isLast ? '' : '<span class="crumb-sep">/</span>');
+    }).join('');
+    el.querySelectorAll('.crumb:not(.crumb-current)').forEach(btn => {
+      btn.addEventListener('click', () => openFolder(btn.dataset.folder || null, btn.dataset.folder ? undefined : 'root'));
+    });
+  }
+
+  async function openFolder(folderId, viaRoot){
+    if(viaRoot === 'root'){
+      currentFolder = null; path = [];
+    } else {
+      currentFolder = folderId || null;
+    }
+    persistUIPref();
+    await renderAll();
+  }
+
+  async function enterFolder(item){
+    currentFolder = item.id;
+    path.push({ id: item.id, name: item.name });
+    persistUIPref();
+    await renderAll();
+  }
+
+  async function renderGrid(){
+    const grid = document.getElementById('driveGrid');
+    const empty = document.getElementById('driveEmpty');
+    let items = [];
+    try{
+      const res = await Api.listFiles(currentFolder);
+      items = res.items || [];
+    }catch(e){
+      toast('error', 'Could not load folder', e.message);
+    }
+    grid.classList.toggle('list-mode', viewMode === 'list');
+    grid.innerHTML = '';
+    if(items.length === 0){
+      empty.style.display = 'flex';
+    } else {
+      empty.style.display = 'none';
+      for(const item of items) grid.appendChild(buildItemCard(item));
+    }
+  }
+
+  function buildItemCard(item, context){
+    const card = document.createElement('div');
+    card.className = 'item-card';
+    card.dataset.id = item.id;
+    const previewable = isPreviewableImage(item);
+    const icon = previewable
+      ? `<img class="item-thumb" src="${Api.viewUrl(item.id)}" alt="" loading="lazy" onerror="this.style.display='none'">`
+      : (item.type === 'folder' ? folderIconSVG() : fileIconSVG());
+    const meta = item.type === 'folder' ? 'Folder' : formatBytes(item.size || 0);
+    const pathCaption = (context === 'search')
+      ? `<div class="item-path" title="${escapeHTML(breadcrumbText(item.path))}">${escapeHTML(breadcrumbText(item.path))}</div>`
+      : '';
+    card.innerHTML = `
+      <div class="item-icon">${icon}</div>
+      <div class="item-name" title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</div>
+      <div class="item-meta">${meta}</div>
+      ${pathCaption}
+      <button class="item-menu-btn" aria-label="More actions">\u22ef</button>
+    `;
+    const openAction = () => {
+      if(item.type === 'folder'){
+        if(context === 'search') goToSearchResult(item);
+        else enterFolder(item);
+      } else if(isPreviewableImage(item)){
+        openLightbox(item);
+      } else {
+        window.location.href = Api.downloadUrl(item.id);
+      }
+    };
+    card.addEventListener('dblclick', openAction);
+    card.querySelector('.item-menu-btn').addEventListener('click', (e) => {
+      e.stopPropagation();
+      showItemMenu(item, e.currentTarget, context);
+    });
+    return card;
+  }
+
+  function breadcrumbText(pathChain){
+    const names = ['My Drive', ...((pathChain || []).map(p => p.name))];
+    return names.join(' / ');
+  }
+
+  /** Jump out of search results to wherever a result actually lives. */
+  async function goToSearchResult(item){
+    if(item.type === 'folder'){
+      currentFolder = item.id;
+      path = [...(item.path || []), { id: item.id, name: item.name }];
+    } else {
+      currentFolder = item.parentId || null;
+      path = item.path || [];
+    }
+    clearSearch();
+    persistUIPref();
+    await renderAll();
+  }
+
+  async function renderSearchResults(){
+    const grid = document.getElementById('driveGrid');
+    const empty = document.getElementById('driveEmpty');
+    const breadcrumbEl = document.getElementById('breadcrumb');
+
+    breadcrumbEl.innerHTML = `
+      <div class="search-heading">
+        <span>Results for \u201c${escapeHTML(searchQuery)}\u201d</span>
+        <button class="exit-search" id="exitSearchBtn">Back to My Drive</button>
+      </div>
+    `;
+    document.getElementById('exitSearchBtn').addEventListener('click', () => {
+      clearSearch();
+      renderAll();
+    });
+
+    let items = [];
+    try{
+      const res = await Api.search(searchQuery);
+      items = res.items || [];
+    }catch(e){
+      toast('error', 'Search failed', e.message);
+    }
+
+    grid.classList.remove('list-mode');
+    grid.innerHTML = '';
+    if(items.length === 0){
+      empty.style.display = 'flex';
+      empty.querySelector('strong').textContent = 'No matches';
+      empty.querySelector('p').textContent = `Nothing in your drive matches \u201c${searchQuery}\u201d.`;
+    } else {
+      empty.style.display = 'none';
+      for(const item of items) grid.appendChild(buildItemCard(item, 'search'));
+    }
+  }
+
+  function clearSearch(){
+    searchQuery = '';
+    const input = document.getElementById('searchInput');
+    if(input) input.value = '';
+    document.getElementById('searchClear').style.display = 'none';
+    const empty = document.getElementById('driveEmpty');
+    empty.querySelector('strong').textContent = 'Nothing here yet';
+    empty.querySelector('p').textContent = 'Drag files in, or use New to add a folder or upload something.';
+  }
+
+  function showItemMenu(item, anchor, context){
+    document.querySelectorAll('.item-menu').forEach(m => m.remove());
+    const menu = document.createElement('div');
+    menu.className = 'item-menu';
+    const previewBtn = isPreviewableImage(item) ? '<button data-act="preview">Preview</button>' : '';
+    const showInFolderBtn = (context === 'search' && item.type === 'file') ? '<button data-act="showInFolder">Show in folder</button>' : '';
+    menu.innerHTML = `
+      ${previewBtn}
+      ${item.type === 'file' ? '<button data-act="download">Download</button>' : '<button data-act="open">Open</button>'}
+      ${showInFolderBtn}
+      <button data-act="rename">Rename</button>
+      <button data-act="delete" class="danger">Delete</button>
+    `;
+    document.body.appendChild(menu);
+    const rect = anchor.getBoundingClientRect();
+    menu.style.top = (rect.bottom + window.scrollY + 4) + 'px';
+    menu.style.left = Math.min(rect.left + window.scrollX, window.innerWidth - 170) + 'px';
+
+    const close = () => menu.remove();
+    setTimeout(() => document.addEventListener('click', close, { once:true }), 0);
+
+    menu.querySelector('[data-act="rename"]').addEventListener('click', async () => {
+      const name = prompt('Rename to:', item.name);
+      if(name && name.trim()){
+        try{ await Api.rename(item.id, name.trim()); await renderGrid(); }
+        catch(e){ toast('error', 'Rename failed', e.message); }
+      }
+    });
+    menu.querySelector('[data-act="delete"]').addEventListener('click', async () => {
+      try{ await Api.remove(item.id); await renderAll(); }
+      catch(e){ toast('error', 'Delete failed', e.message); }
+    });
+    if(previewBtn){
+      menu.querySelector('[data-act="preview"]').addEventListener('click', () => openLightbox(item));
+    }
+    if(showInFolderBtn){
+      menu.querySelector('[data-act="showInFolder"]').addEventListener('click', async () => {
+        currentFolder = item.parentId || null;
+        path = item.path || [];
+        clearSearch();
+        persistUIPref();
+        await renderAll();
+      });
+    }
+    if(item.type === 'file'){
+      menu.querySelector('[data-act="download"]').addEventListener('click', () => {
+        window.location.href = Api.downloadUrl(item.id);
+      });
+    } else {
+      menu.querySelector('[data-act="open"]').addEventListener('click', () => {
+        if(context === 'search') goToSearchResult(item);
+        else enterFolder(item);
+      });
+    }
+  }
+
+  function openLightbox(item){
+    const backdrop = document.getElementById('lightbox');
+    const img = document.getElementById('lightboxImg');
+    const spinner = document.getElementById('lightboxSpinner');
+    const nameEl = document.getElementById('lightboxName');
+    const downloadLink = document.getElementById('lightboxDownload');
+
+    nameEl.textContent = `${item.name} \u00b7 ${formatBytes(item.size || 0)}`;
+    downloadLink.href = Api.downloadUrl(item.id);
+    downloadLink.setAttribute('download', item.name);
+
+    img.style.display = 'none';
+    spinner.style.display = '';
+    img.src = Api.viewUrl(item.id);
+    img.onload = () => { spinner.style.display = 'none'; img.style.display = ''; };
+    img.onerror = () => { spinner.textContent = 'Could not load preview.'; };
+
+    backdrop.style.display = 'flex';
+    document.addEventListener('keydown', onLightboxKeydown);
+  }
+
+  function closeLightbox(){
+    const backdrop = document.getElementById('lightbox');
+    const img = document.getElementById('lightboxImg');
+    backdrop.style.display = 'none';
+    img.src = '';
+    document.removeEventListener('keydown', onLightboxKeydown);
+  }
+
+  function onLightboxKeydown(e){
+    if(e.key === 'Escape') closeLightbox();
+  }
+
+  async function renderStorage(){
+    try{
+      const { used, quota } = await Api.usage();
+      const pct = Math.min(100, (used / quota) * 100);
+      document.getElementById('storageBar').style.width = pct.toFixed(1) + '%';
+      document.getElementById('storageLabel').textContent = `${formatBytes(used)} of ${formatBytes(quota)} used`;
+    }catch(e){ /* non-fatal */ }
+  }
+
+  async function handleFiles(fileList){
+    const list = Array.from(fileList);
+    for(const file of list){
+      const rowId = crypto.randomUUID();
+      toast('progress', file.name, 'Uploading\u2026', rowId);
+      try{
+        await Api.uploadFile(file, currentFolder, (frac) => {
+          updateToast(rowId, 'progress', file.name, `Uploading\u2026 ${(frac*100).toFixed(0)}%`);
+        });
+        updateToast(rowId, 'success', 'Uploaded', file.name);
+      }catch(e){
+        updateToast(rowId, 'error', 'Blocked', e.message);
+      }
+    }
+    await renderAll();
+  }
+
+  function setViewMode(mode, persist=true){
+    viewMode = mode;
+    document.getElementById('viewGrid').classList.toggle('active', mode==='grid');
+    document.getElementById('viewList').classList.toggle('active', mode==='list');
+    document.getElementById('driveGrid').classList.toggle('list-mode', mode==='list');
+    if(persist) persistUIPref();
+  }
+
+  function wireEvents(){
+    const newBtn = document.getElementById('newBtn');
+    const newDropdown = document.getElementById('newDropdown');
+    newBtn.addEventListener('click', (e) => { e.stopPropagation(); newDropdown.classList.toggle('open'); });
+    document.addEventListener('click', () => newDropdown.classList.remove('open'));
+
+    document.getElementById('newFolderBtn').addEventListener('click', async () => {
+      newDropdown.classList.remove('open');
+      const name = prompt('Folder name:');
+      if(name && name.trim()){
+        try{ await Api.createFolder(name.trim(), currentFolder); await renderAll(); }
+        catch(e){ toast('error', 'Could not create folder', e.message); }
+      }
+    });
+
+    const fileInput = document.getElementById('fileInput');
+    document.getElementById('uploadBtn').addEventListener('click', () => {
+      newDropdown.classList.remove('open');
+      fileInput.click();
+    });
+    fileInput.addEventListener('change', () => {
+      if(fileInput.files.length) handleFiles(fileInput.files);
+      fileInput.value = '';
+    });
+
+    document.getElementById('viewGrid').addEventListener('click', () => setViewMode('grid'));
+    document.getElementById('viewList').addEventListener('click', () => setViewMode('list'));
+
+    const searchInput = document.getElementById('searchInput');
+    const searchClearBtn = document.getElementById('searchClear');
+    searchInput.addEventListener('input', () => {
+      const val = searchInput.value;
+      searchClearBtn.style.display = val ? '' : 'none';
+      clearTimeout(searchDebounceTimer);
+      searchDebounceTimer = setTimeout(() => {
+        searchQuery = val.trim();
+        renderAll();
+      }, 250);
+    });
+    searchInput.addEventListener('keydown', (e) => {
+      if(e.key === 'Enter'){
+        clearTimeout(searchDebounceTimer);
+        searchQuery = searchInput.value.trim();
+        renderAll();
+      } else if(e.key === 'Escape'){
+        searchInput.blur();
+        clearSearch();
+        renderAll();
+      }
+    });
+    searchClearBtn.addEventListener('click', () => {
+      clearSearch();
+      renderAll();
+    });
+
+    const userChip = document.getElementById('userChip');
+    const userDropdown = document.getElementById('userDropdown');
+    userChip.addEventListener('click', (e) => { e.stopPropagation(); userDropdown.classList.toggle('open'); });
+    document.addEventListener('click', () => userDropdown.classList.remove('open'));
+    document.getElementById('goSettings').addEventListener('click', () => window.location.href = '/settings/');
+    document.getElementById('doLogout').addEventListener('click', async () => {
+      try{ await Api.logout(); } finally { window.location.href = '/login/'; }
+    });
+
+    const dropzone = document.getElementById('driveMain');
+    let dragDepth = 0;
+    dropzone.addEventListener('dragenter', (e) => { e.preventDefault(); dragDepth++; dropzone.classList.add('drag-over'); });
+    dropzone.addEventListener('dragover', (e) => e.preventDefault());
+    dropzone.addEventListener('dragleave', () => { dragDepth = Math.max(0, dragDepth-1); if(dragDepth===0) dropzone.classList.remove('drag-over'); });
+    dropzone.addEventListener('drop', (e) => {
+      e.preventDefault(); dragDepth = 0; dropzone.classList.remove('drag-over');
+      if(e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);
+    });
+
+    document.getElementById('lightboxClose').addEventListener('click', closeLightbox);
+    document.getElementById('lightbox').addEventListener('click', (e) => {
+      if(e.target.id === 'lightbox') closeLightbox();
+    });
+  }
+
+  function escapeHTML(str){ const d = document.createElement('div'); d.textContent = str; return d.innerHTML; }
+  function formatBytes(n){
+    if(n < 1024) return n + ' B';
+    const units = ['KB','MB','GB','TB']; let u=-1;
+    do{ n/=1024; u++; } while(n>=1024 && u<units.length-1);
+    return n.toFixed(n<10?1:0) + ' ' + units[u];
+  }
+  function folderIconSVG(){
+    return `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M3 6.5C3 5.67 3.67 5 4.5 5H9.5L11.5 7.5H19.5C20.33 7.5 21 8.17 21 9V17.5C21 18.33 20.33 19 19.5 19H4.5C3.67 19 3 18.33 3 17.5V6.5Z" fill="url(#fg)"/>
+      <defs><linearGradient id="fg" x1="3" y1="5" x2="21" y2="19"><stop stop-color="#ff5a4c"/><stop offset="1" stop-color="#a11c12"/></linearGradient></defs>
+    </svg>`;
+  }
+  function fileIconSVG(){
+    return `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M6 3.5C6 3 6.5 2.5 7 2.5H14L18.5 7V20C18.5 20.5 18 21 17.5 21H7C6.5 21 6 20.5 6 20V3.5Z" stroke="#b8ada0" stroke-width="1.3"/>
+      <path d="M14 2.5V7H18.5" stroke="#b8ada0" stroke-width="1.3"/>
+    </svg>`;
+  }
+
+  function ensureToastStack(){
+    let stack = document.getElementById('toast-stack');
+    if(!stack){ stack = document.createElement('div'); stack.id = 'toast-stack'; document.body.appendChild(stack); }
+    return stack;
+  }
+  function toast(kind, title, body, id){
+    const stack = ensureToastStack();
+    const el = document.createElement('div');
+    el.className = 'toast ' + (kind === 'progress' ? '' : kind);
+    el.dataset.toastId = id || crypto.randomUUID();
+    el.innerHTML = `<div><strong>${escapeHTML(title)}</strong>${escapeHTML(body)}</div>`;
+    stack.appendChild(el);
+    if(kind !== 'progress' && kind !== 'error') setTimeout(() => el.remove(), 4000);
+    return el.dataset.toastId;
+  }
+  function updateToast(id, kind, title, body){
+    const stack = ensureToastStack();
+    let el = stack.querySelector(`[data-toast-id="${id}"]`);
+    if(!el){ toast(kind, title, body, id); return; }
+    el.className = 'toast ' + kind;
+    el.innerHTML = `<div><strong>${escapeHTML(title)}</strong>${escapeHTML(body)}</div>`;
+    if(kind !== 'error') setTimeout(() => el.remove(), 5000);
+  }
+
+  boot();
+})();
+</script>
+</body>
+</html>
