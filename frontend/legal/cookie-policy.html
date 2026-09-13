@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cookie Policy — NexCore</title>
+<link rel="stylesheet" href="../shared/styles.css">
+<style>
+  .legal-wrap{ max-width: 680px; margin: 0 auto; padding: 40px 24px 100px; line-height:1.65; }
+  .back-link{ color: var(--paper-dim); text-decoration:none; font-size: 13.5px; display:inline-flex; align-items:center; gap:6px; margin-bottom: 26px; }
+  .back-link:hover{ color: var(--ember-1); }
+  h1{ font-family: var(--font-display); font-size: 24px; font-weight:500; margin: 0 0 8px; }
+  .updated{ color: var(--muted); font-size: 12.5px; margin-bottom: 34px; }
+  h2{ font-size: 16px; margin: 34px 0 10px; }
+  p, li{ color: var(--paper-dim); font-size: 14px; }
+  table{ width:100%; border-collapse: collapse; margin: 14px 0 6px; font-size: 13px; }
+  th, td{ text-align:left; padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th{ color: var(--paper); font-weight:600; }
+  code{ background: rgba(255,255,255,0.06); padding: 1px 5px; border-radius:3px; font-size: 12.5px; }
+  .manage-cta{ margin-top: 30px; }
+</style>
+</head>
+<body>
+<div class="legal-wrap">
+  <a href="/dashboard/" class="back-link">← Back to NexCore</a>
+  <h1>Cookie Policy</h1>
+  <p class="updated">Plain-language version — this describes exactly what this NexCore instance does, not a generic template.</p>
+
+  <p>NexCore is self-hosted software: the person running this server controls it, and this page describes the
+  cookies the software itself sets. It does not send data to any third party — there's no analytics
+  provider, ad network, or external tracker built into it.</p>
+
+  <h2>Cookies this site sets</h2>
+  <table>
+    <tr><th>Cookie</th><th>Purpose</th><th>Category</th><th>Lifetime</th></tr>
+    <tr>
+      <td><code>nexcore_session</code></td>
+      <td>Keeps you signed in between page loads.</td>
+      <td>Necessary</td>
+      <td>30 days</td>
+    </tr>
+    <tr>
+      <td><code>nexcore_consent</code></td>
+      <td>Remembers your cookie preference so we don't ask every visit.</td>
+      <td>Necessary</td>
+      <td>180 days</td>
+    </tr>
+    <tr>
+      <td><code>nexcore_ui</code></td>
+      <td>Remembers your last-open folder and grid/list view. Only set if you opt in below.</td>
+      <td>Functional</td>
+      <td>180 days</td>
+    </tr>
+  </table>
+
+  <h2>Analytics</h2>
+  <p>This build doesn't include any analytics or tracking script. The "Analytics" toggle in preferences exists
+  so the pattern is there if the person hosting this server ever adds an analytics tool — turning it on today
+  does not cause anything to run.</p>
+
+  <h2>Your choices</h2>
+  <p>You can accept all cookies, use only the necessary ones, or pick exactly which optional categories you're
+  comfortable with. Necessary cookies can't be turned off because the site can't keep you signed in without one
+  of them.</p>
+
+  <div class="manage-cta">
+    <button class="btn btn-primary" id="managePrefsBtn">Manage cookie preferences</button>
+  </div>
+
+  <h2>Questions</h2>
+  <p>Since this is self-hosted software, questions about how a particular instance is run should go to whoever
+  operates that server — NexCore itself doesn't operate a hosted service or collect anything centrally.</p>
+</div>
+
+<script src="../shared/consent.js"></script>
+<script>
+  document.getElementById('managePrefsBtn').addEventListener('click', () => openPreferencesModal());
+</script>
+</body>
+</html>
