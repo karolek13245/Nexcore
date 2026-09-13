@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Settings — NexCore</title>
+<link rel="stylesheet" href="../shared/styles.css">
+<style>
+  .settings-wrap{ max-width: 640px; margin: 0 auto; padding: 40px 24px 80px; }
+  .settings-header{ display:flex; align-items:center; justify-content:space-between; margin-bottom: 30px; }
+  .back-link{ color: var(--paper-dim); text-decoration:none; font-size: 13.5px; display:inline-flex; align-items:center; gap:6px; }
+  .back-link:hover{ color: var(--ember-1); }
+  h1{ font-family: var(--font-display); font-size: 22px; font-weight:500; margin: 0 0 30px; }
+  .settings-section{
+    background: rgba(255,255,255,0.02); border: 1px solid var(--line);
+    border-radius: 6px; padding: 22px 24px; margin-bottom: 18px;
+  }
+  .settings-section h2{ font-size: 14px; margin: 0 0 16px; color: var(--paper-dim); text-transform: uppercase; letter-spacing: 0.06em; font-family: var(--font-display); }
+  .settings-row{ display:flex; align-items:center; justify-content:space-between; padding: 10px 0; border-top: 1px solid var(--line); gap: 16px; }
+  .settings-row:first-of-type{ border-top:none; }
+  .settings-row .label{ font-size: 13.5px; color: var(--paper-dim); }
+  .settings-row .value{ font-size: 13.5px; text-align:right; word-break: break-all; }
+  .storage-track{ height: 6px; border-radius: 3px; background: rgba(255,255,255,0.06); overflow:hidden; margin: 10px 0 6px; }
+  .storage-track > div{ height:100%; background: linear-gradient(90deg, var(--ember-1), var(--ember-3)); width:0%; transition: width 0.3s ease; }
+</style>
+</head>
+<body>
+
+<div class="settings-wrap">
+  <div class="settings-header">
+    <a href="/dashboard/" class="back-link">← Back to Drive</a>
+    <div class="mark">nexcore</div>
+  </div>
+  <h1>Settings</h1>
+
+  <div class="settings-section">
+    <h2>Account</h2>
+    <div class="settings-row">
+      <span class="label">Email</span>
+      <span class="value" id="accountEmail">…</span>
+    </div>
+    <div class="settings-row">
+      <span class="label">Session</span>
+      <button class="btn btn-ghost" id="signOutBtn">Sign out</button>
+    </div>
+  </div>
+
+  <div class="settings-section">
+    <h2>Storage</h2>
+    <div class="storage-track"><div id="storageBar"></div></div>
+    <div id="storageLabel" style="font-size:12.5px; color:var(--paper-dim);">…</div>
+  </div>
+
+  <div class="settings-section">
+    <h2>Privacy</h2>
+    <div class="settings-row">
+      <span class="label">Cookie preferences</span>
+      <button class="btn btn-ghost" id="managePrefsBtn">Manage</button>
+    </div>
+    <div class="settings-row">
+      <span class="label">Read the full policy</span>
+      <a class="btn btn-text" href="/legal/cookie-policy.html">Cookie policy →</a>
+    </div>
+  </div>
+</div>
+
+<script src="../shared/api-client.js"></script>
+<script src="../shared/consent.js"></script>
+<script>
+  (async function(){
+    let me;
+    try{ me = await Api.me(); }catch(e){ me = { email: null }; }
+    if(!me.email){ window.location.href = '/login/'; return; }
+    document.getElementById('accountEmail').textContent = me.email;
+
+    try{
+      const { used, quota } = await Api.usage();
+      const pct = Math.min(100, (used/quota)*100);
+      document.getElementById('storageBar').style.width = pct.toFixed(1) + '%';
+      const fmt = (n) => { if(n<1024) return n+' B'; const u=['KB','MB','GB','TB']; let i=-1; do{n/=1024;i++;}while(n>=1024&&i<u.length-1); return n.toFixed(n<10?1:0)+' '+u[i]; };
+      document.getElementById('storageLabel').textContent = `${fmt(used)} of ${fmt(quota)} used`;
+    }catch(e){}
+
+    document.getElementById('signOutBtn').addEventListener('click', async () => {
+      try{ await Api.logout(); } finally { window.location.href = '/login/'; }
+    });
+    document.getElementById('managePrefsBtn').addEventListener('click', () => openPreferencesModal());
+  })();
+</script>
+</body>
+</html>
